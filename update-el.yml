@@ -1,0 +1,126 @@
+---
+- hosts: all
+  vars:
+    content_view: test
+    satellite:
+      method: https
+      fqdn: centos7-katello-nightly.sean.example.com
+      user: admin
+      password: changeme
+      verify_certs: no
+    satellite_host_name_fact: "{{ ansible_fqdn }}"
+    satellite_lifecycle_env: Library #Set the env a host will go into, could easily be a fact with the current env
+    satellite_org_id: 1
+  tasks:
+    - name: Get Content View IDs
+      uri:
+        url: "{{ satellite.method }}://{{ satellite.fqdn }}/katello/api/content_views"
+        method: GET
+        user: "{{ satellite.user }}"
+        password: "{{ satellite.password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ satellite.verify_certs }}"
+      register: content_views
+      run_once: true
+      delegate_to: localhost
+
+    - name: Set content_view_id 
+      set_fact:
+        content_view_id: "{{ item.id }}"
+      with_items:
+        - "{{ content_views.json.results }}"
+      when:
+        - item.label == content_view
+        - content_view_id is not defined
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Get Lifecycle Enviornments IDs
+      uri:
+        url: "{{ satellite.method }}://{{ satellite.fqdn }}/katello/api/environments"
+        method: GET
+        user: "{{ satellite.user }}"
+        password: "{{ satellite.password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ satellite.verify_certs }}"
+      register: lifecycle_envs
+      run_once: true
+      delegate_to: localhost
+
+    - name: Set Envionments IDs
+      set_fact:
+        lifecycle_env_ids: "{{ lifecycle_env_ids | default({}) | combine({item.label: item.id}) }}"
+      with_items:
+        - "{{ lifecycle_envs.json.results }}"
+      run_once: true
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Get Hosts IDs
+      uri:
+        url: "{{ satellite.method }}://{{ satellite.fqdn }}/api/hosts?thin=true"
+        method: GET
+        user: "{{ satellite.user }}"
+        password: "{{ satellite.password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ satellite.verify_certs }}"
+      register: hosts
+      run_once: true
+      delegate_to: localhost
+
+    - name: Set Host IDs to update 
+      set_fact:
+        host_ids_env: "{{ host_ids_env | default({}) | combine({ satellite_lifecycle_env: (( host_ids_env | default({}) )[satellite_lifecycle_env] | default([]) ) + [item.id] }) }}" 
+      with_items:
+        - "{{ hosts.json.results }}"
+      when: satellite_host_name_fact == item.name
+      changed_when: false
+
+    - name: Change Content Views
+      uri:
+        url: "{{ satellite.method }}://{{ satellite.fqdn }}/api/hosts/bulk/environment_content_view"
+        method: PUT
+        user: "{{ satellite.user }}"
+        password: "{{ satellite.password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ satellite.verify_certs }}"
+        status_code: 200,202
+        body_format: json
+        body:
+          organization_id: "{{ satellite_org_id }}"
+          included:
+            ids: "{{ item.value }}"
+          environment_id: "{{ lifecycle_env_ids[item.key] }}"
+          content_view_id: "{{ content_view_id }}"
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json,version=2"
+      with_dict: "{{ host_ids_env }}"
+      delegate_to: localhost
+      register: cv_move_task
+
+    - name: Check change Content View task status
+      uri:
+        url: "{{ satellite.method }}://{{ satellite.fqdn }}/foreman_tasks/api/tasks/{{ cv_move_task.results[0].json.id }}"
+        method: GET
+        user: "{{ satellite.user }}"
+        password: "{{ satellite.password }}"
+        force_basic_auth: yes
+        validate_certs: "{{ satellite.verify_certs }}"
+      changed_when: false
+      register: cv_move_task_status
+      until: cv_move_task_status.json.state == "stopped"
+      retries: 40
+      delay: 5
+
+    - name: Exit if Changing Content Views failed
+      fail:
+        msg: "Changing Content Views failed... See {{ satellite.method }}://{{ satellite.fqdn }}/foreman_tasks/tasks/{{ cv_move_task.results[0].json.id }}"
+      when: cv_move_task_status.json.result != "success"
+
+    - name: Update packages
+      yum:
+        name: '*'
+        update_cache: yes
+        state: latest
