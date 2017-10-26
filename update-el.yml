@@ -120,6 +120,7 @@
       when: cv_move_task_status.json.result != "success"
 
     - name: Update packages
+      become: yes
       yum:
         name: '*'
         update_cache: yes
