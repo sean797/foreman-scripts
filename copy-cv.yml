@@ -221,4 +221,6 @@
           Content-Type: "application/json"
           Accept: "application/json,version=2"
       with_items: "{{ activation_keys.json.results }}"
-      when: item.name in ak_to_update
+      when:
+        - ak_to_update is defined
+        - item.name in ak_to_update
